@@ -2,159 +2,34 @@ from flask import Flask, render_template_string, request, jsonify, send_file
 import pandas as pd
 import time
 import io
-import requests
-import urllib.parse
-from urllib.parse import urlparse
+import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Simplified URL resolver for Vercel
-class SimpleURLResolver:
-    def __init__(self, timeout=10, max_redirects=10):
-        self.timeout = timeout
-        self.max_redirects = max_redirects
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-    
-    def resolve_url(self, url):
-        if not url or not isinstance(url, str):
-            raise ValueError("Invalid URL provided")
-        
-        url = url.strip()
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        redirect_chain = [url]
-        current_url = url
-        
-        try:
-            for i in range(self.max_redirects):
-                response = self.session.head(
-                    current_url, 
-                    allow_redirects=False, 
-                    timeout=self.timeout,
-                    verify=False
-                )
-                
-                if response.status_code in [301, 302, 303, 307, 308]:
-                    next_url = response.headers.get('Location')
-                    if not next_url or next_url in redirect_chain:
-                        break
-                    
-                    if next_url.startswith('/'):
-                        parsed_current = urlparse(current_url)
-                        next_url = f"{parsed_current.scheme}://{parsed_current.netloc}{next_url}"
-                    
-                    redirect_chain.append(next_url)
-                    current_url = next_url
-                elif response.status_code == 200:
-                    break
-                else:
-                    break
-            
-            return current_url, redirect_chain
-            
-        except Exception as e:
-            raise Exception(f"URL resolution failed: {str(e)}")
+# Configure for Railway - more generous limits
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
-# Simplified Wayback archiver for Vercel
-class SimpleWaybackArchiver:
-    def __init__(self, timeout=15):
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.save_api_url = "https://web.archive.org/save/"
-        self.session.headers.update({
-            'User-Agent': 'SMS-URL-Analyzer/1.0'
-        })
-    
-    def archive_url(self, url):
-        if not url or not isinstance(url, str):
-            return None
-        
-        url = url.strip()
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        try:
-            archive_url = self.save_api_url + urllib.parse.quote(url, safe=':/?#[]@!$&\'()*+,;=')
-            
-            response = self.session.get(
-                archive_url,
-                timeout=self.timeout,
-                allow_redirects=True
-            )
-            
-            if response.status_code == 200 and 'web.archive.org/web/' in response.url:
-                return response.url
-            else:
-                timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-                return f"https://web.archive.org/web/{timestamp}/{url}"
-                
-        except Exception:
-            return None
+# Import modules with error handling
+modules_loaded = False
+error_message = ""
 
-# Initialize components
-url_resolver = SimpleURLResolver()
-wayback_archiver = SimpleWaybackArchiver()
-
-def load_spreadsheet_file(uploaded_file):
-    """Load a spreadsheet file from Flask file upload"""
-    if uploaded_file is None or uploaded_file.filename == '':
-        raise ValueError("No file provided")
+try:
+    from url_resolver import URLResolver
+    from wayback_archiver import WaybackArchiver
+    from spreadsheet_processor import SpreadsheetProcessor
     
-    filename = uploaded_file.filename.lower()
-    
-    # Determine file type
-    if filename.endswith('.csv'):
-        file_type = 'csv'
-    elif filename.endswith('.xlsx'):
-        file_type = 'xlsx'
-    elif filename.endswith('.xls'):
-        file_type = 'xls'
-    else:
-        content_type = getattr(uploaded_file, 'content_type', '') or ''
-        if 'csv' in content_type:
-            file_type = 'csv'
-        elif 'excel' in content_type or 'spreadsheet' in content_type:
-            file_type = 'xlsx'
-        else:
-            raise ValueError("Unsupported file format. Supported formats: .csv, .xlsx, .xls")
-    
-    try:
-        uploaded_file.seek(0)
-        
-        if file_type == 'csv':
-            encodings = ['utf-8', 'latin-1', 'cp1252']
-            for encoding in encodings:
-                try:
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding=encoding)
-                    return clean_dataframe(df)
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            
-            # Final attempt with error replacement
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
-            return clean_dataframe(df)
-            
-        else:  # Excel files
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
-            return clean_dataframe(df)
-        
-    except Exception as e:
-        raise Exception(f"Error loading file: {str(e)}")
-
-def clean_dataframe(df):
-    """Clean and normalize the DataFrame"""
-    df = df.dropna(how='all')
-    df = df.dropna(axis=1, how='all')
-    df.columns = df.columns.astype(str).str.strip()
-    df = df.reset_index(drop=True)
-    return df
+    # Initialize components
+    url_resolver = URLResolver()
+    wayback_archiver = WaybackArchiver()
+    spreadsheet_processor = SpreadsheetProcessor()
+    modules_loaded = True
+except ImportError as e:
+    error_message = f"Import error: {e}"
+    print(error_message)
+except Exception as e:
+    error_message = f"Initialization error: {e}"
+    print(error_message)
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -164,7 +39,11 @@ HTML_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMS URL Analyzer</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -191,8 +70,33 @@ HTML_TEMPLATE = '''
             padding: 40px 30px;
         }
         
-        .header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 10px; }
-        .content { padding: 40px; }
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .success-notice {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
         
         .upload-section {
             background: #f8f9fa;
@@ -222,7 +126,9 @@ HTML_TEMPLATE = '''
             gap: 25px;
         }
         
-        .form-group { margin-bottom: 0; }
+        .form-group {
+            margin-bottom: 0;
+        }
         
         .form-group label {
             display: block;
@@ -322,10 +228,27 @@ HTML_TEMPLATE = '''
         </div>
 
         <div class="content">
+            {% if not modules_loaded %}
+            <div class="warning">
+                <strong>Warning:</strong> Some modules failed to load. Application may not work properly.<br>
+                Error: {{ error_message }}
+            </div>
+            {% endif %}
+            
+            <div class="success-notice">
+                <strong>🚀 Now running on Railway!</strong> No more timeout limitations - process as many URLs as you need!
+                <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li>✅ <strong>No timeout limits</strong> - process hundreds of URLs</li>
+                    <li>✅ <strong>Larger file support</strong> - up to 50MB uploads</li>
+                    <li>✅ <strong>Full Wayback Machine archiving</strong> - every URL gets archived</li>
+                    <li>✅ <strong>Better performance</strong> - dedicated container resources</li>
+                </ul>
+            </div>
+
             <div class="upload-section">
                 <h3>Upload Spreadsheet</h3>
                 <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" class="form-control" style="margin-bottom: 15px;">
-                <p>Supported formats: CSV, Excel (.xlsx, .xls)</p>
+                <p>Supported formats: CSV, Excel (.xlsx, .xls) - Max 50MB</p>
             </div>
 
             <div class="settings">
@@ -337,11 +260,17 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="form-group">
                         <label for="delay">Delay Between Requests (seconds):</label>
-                        <input type="number" id="delay" class="form-control" value="1.0" min="0.1" max="5.0" step="0.1">
+                        <input type="number" id="delay" class="form-control" value="1.0" min="0.0" max="5.0" step="0.1">
+                        <small style="color: #666; font-size: 12px;">Recommended: 0.5-2.0s to respect service rate limits</small>
                     </div>
                     <div class="form-group">
                         <label for="retries">Maximum Retries:</label>
                         <input type="number" id="retries" class="form-control" value="2" min="0" max="5">
+                    </div>
+                    <div class="form-group">
+                        <label for="maxUrls">Max URLs to Process (0 = all):</label>
+                        <input type="number" id="maxUrls" class="form-control" value="0" min="0" max="10000">
+                        <small style="color: #666; font-size: 12px;">Set to 0 to process all URLs in the file</small>
                     </div>
                 </div>
             </div>
@@ -363,6 +292,14 @@ HTML_TEMPLATE = '''
                 
                 <h4>Supported URL Shorteners</h4>
                 <p>bit.ly, tinyurl.com, t.co (Twitter), goo.gl, short.link, and many more!</p>
+                
+                <h4>Railway Advantages</h4>
+                <ul>
+                    <li><strong>No timeout limits:</strong> Process datasets of any size</li>
+                    <li><strong>Better performance:</strong> Dedicated resources for your application</li>
+                    <li><strong>Reliable archiving:</strong> Full Wayback Machine integration</li>
+                    <li><strong>Larger uploads:</strong> Support for bigger spreadsheet files</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -377,6 +314,16 @@ HTML_TEMPLATE = '''
             status.style.display = 'block';
         }
 
+        function updateProgress(current, total, timeElapsed) {
+            const percent = Math.round((current / total) * 100);
+            const avgTimePerUrl = timeElapsed / Math.max(current, 1);
+            const estimatedTotalTime = avgTimePerUrl * total;
+            const timeRemaining = Math.max(0, estimatedTotalTime - timeElapsed);
+            
+            const message = `Processing ${current}/${total} URLs (${percent}%) - Est. ${Math.round(timeRemaining)}s remaining`;
+            showStatus(message, 'info');
+        }
+
         async function processUrls() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];
@@ -386,11 +333,20 @@ HTML_TEMPLATE = '''
                 return;
             }
 
+            const maxUrls = parseInt(document.getElementById('maxUrls').value);
+
+            // Check file size
+            if (file.size > 50 * 1024 * 1024) {
+                showStatus('File too large. Maximum size is 50MB.', 'error');
+                return;
+            }
+
             const formData = new FormData();
             formData.append('file', file);
             formData.append('url_column', document.getElementById('urlColumn').value);
             formData.append('delay', document.getElementById('delay').value);
             formData.append('retries', document.getElementById('retries').value);
+            formData.append('max_urls', document.getElementById('maxUrls').value);
 
             const processBtn = document.getElementById('processBtn');
             processBtn.disabled = true;
@@ -417,7 +373,7 @@ HTML_TEMPLATE = '''
                 }
 
                 processedData = result.data;
-                showStatus(`Processing complete! Processed ${result.total} URLs, ${result.successful} successful.`, 'success');
+                showStatus(`Processing complete! Processed ${result.processed} URLs, ${result.successful} successful, ${result.failed} failed.`, 'success');
                 document.getElementById('downloadBtn').style.display = 'inline-block';
 
             } catch (error) {
@@ -471,17 +427,23 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE, modules_loaded=modules_loaded, error_message=error_message)
 
 @app.route('/health')
 def health_check():
     return jsonify({
         'status': 'ok',
+        'platform': 'railway',
+        'modules_loaded': modules_loaded,
+        'error_message': error_message if not modules_loaded else None,
         'timestamp': datetime.utcnow().isoformat()
     })
 
 @app.route('/process', methods=['POST'])
 def process_urls():
+    if not modules_loaded:
+        return jsonify({'error': f'Required modules not loaded properly: {error_message}'}), 500
+    
     try:
         # Validate file upload
         if 'file' not in request.files:
@@ -494,9 +456,10 @@ def process_urls():
         url_column = request.form.get('url_column', 'url')
         delay = float(request.form.get('delay', 1.0))
         max_retries = int(request.form.get('retries', 2))
+        max_urls = int(request.form.get('max_urls', 0))  # 0 means process all
         
         # Load the spreadsheet
-        df = load_spreadsheet_file(file)
+        df = spreadsheet_processor.load_file(file)
         
         # Validate URL column exists
         if url_column not in df.columns:
@@ -514,6 +477,11 @@ def process_urls():
         
         # Filter rows with non-empty URLs
         urls_to_process = df[df[url_column].notna() & (df[url_column] != '')]
+        
+        # Apply max_urls limit if specified
+        if max_urls > 0:
+            urls_to_process = urls_to_process.head(max_urls)
+        
         total_urls = len(urls_to_process)
         
         if total_urls == 0:
@@ -523,7 +491,7 @@ def process_urls():
         success_count = 0
         error_count = 0
         
-        # Process each URL
+        # Process each URL without timeout pressure
         for idx, row in urls_to_process.iterrows():
             original_url = str(row[url_column]).strip()
             
@@ -555,9 +523,9 @@ def process_urls():
             
             processed_count += 1
             
-            # Rate limiting for serverless
+            # Normal delay - no rush on Railway
             if processed_count < total_urls and delay > 0:
-                time.sleep(min(delay, 0.2))
+                time.sleep(delay)
         
         # Convert to JSON-serializable format
         result_data = df.to_dict('records')
@@ -571,6 +539,9 @@ def process_urls():
         })
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Processing error: {error_details}")
         return jsonify({'error': f'Processing failed: {str(e)}'}), 500
 
 @app.route('/download', methods=['POST'])
@@ -584,7 +555,9 @@ def download_results():
         
         # Create Excel file in memory
         output = io.BytesIO()
-        df.to_excel(output, index=False, engine='openpyxl')
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Processed_URLs')
+        
         output.seek(0)
         
         return send_file(
@@ -595,6 +568,9 @@ def download_results():
         )
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Download error: {error_details}")
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
 def resolve_with_retries(url, max_retries):
@@ -605,19 +581,26 @@ def resolve_with_retries(url, max_retries):
         except Exception as e:
             if attempt == max_retries:
                 raise e
-            time.sleep(0.1)
+            time.sleep(0.5)  # Normal delay between retries
     return None, []
 
 def archive_with_retries(url, max_retries):
     """Archive URL with retry mechanism"""
     for attempt in range(max_retries + 1):
         try:
-            return wayback_archiver.archive_url(url)
+            result = wayback_archiver.archive_url(url)
+            if result:
+                return result
+            elif attempt == max_retries:
+                return 'Failed to archive after retries'
         except Exception as e:
             if attempt == max_retries:
-                return None
-            time.sleep(0.1)
-    return None
+                return f'Archive error: {str(e)[:50]}...'
+            time.sleep(0.5)  # Normal delay between retries
+    return 'Failed to archive'
+
+# Get port from environment variable for Railway
+port = int(os.environ.get("PORT", 5000))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
